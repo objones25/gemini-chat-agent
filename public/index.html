@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Chat Agent</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Gemini Chat Agent</h1>
+            <p>Powered by Gemini 2.5 Pro with Code Execution, Thinking & Google Search</p>
+        </header>
+        
+        <div class="chat-container">
+            <div id="messages" class="messages"></div>
+            
+            <div class="input-container">
+                <textarea 
+                    id="messageInput" 
+                    placeholder="Ask me anything... I can think, search, and execute code!"
+                    rows="3"
+                ></textarea>
+                <div class="button-group">
+                    <button id="recordButton" class="record-button" title="Hold to record voice message">
+                        <span class="record-icon">🎤</span>
+                        <span class="record-text">Hold to Record</span>
+                    </button>
+                    <button id="sendButton">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/script.js"></script>
+</body>
+</html>
