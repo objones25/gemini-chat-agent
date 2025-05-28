@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { GoogleGenAI } from '@google/genai';
+import { SYSTEM_PROMPT } from './systemPrompt';
 
 interface Env {
   GEMINI_API_KEY: string;
@@ -58,7 +59,20 @@ app.post('/api/chat', async (c) => {
       try {
         const response = await ai.models.generateContentStream({
           model: 'gemini-2.5-pro-preview-05-06',
-          contents: message,
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: SYSTEM_PROMPT }]
+            },
+            {
+              role: 'model',
+              parts: [{ text: 'I understand. I will follow these guidelines to provide exceptional, thoughtful responses using my thinking, code execution, and web search capabilities as appropriate.' }]
+            },
+            {
+              role: 'user',
+              parts: [{ text: message }]
+            }
+          ],
           config: {
             tools: [
               { codeExecution: {} },
