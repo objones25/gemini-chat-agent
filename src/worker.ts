@@ -8,6 +8,19 @@ interface Env {
   CHAT_HISTORY?: KVNamespace;
 }
 
+interface ChatMessage {
+  role: 'user' | 'model';
+  content: string;
+  timestamp: number;
+}
+
+interface ChatHistory {
+  sessionId: string;
+  messages: ChatMessage[];
+  createdAt: number;
+  lastUpdated: number;
+}
+
 const app = new Hono<{ Bindings: Env }>();
 
 // Enable CORS for all routes
@@ -41,11 +54,17 @@ app.get('/script.js', (c) => {
 // Handle chat API
 app.post('/api/chat', async (c) => {
   try {
-    const { message } = await c.req.json() as { message: string };
+    const { message, sessionId } = await c.req.json() as { message: string; sessionId?: string };
     
     if (!message) {
       return c.text('Message is required', 400);
     }
+
+    // Generate or use provided session ID
+    const currentSessionId = sessionId || generateSessionId();
+    
+    // Get chat history from KV storage
+    const chatHistory = await getChatHistory(c.env.CHAT_HISTORY, currentSessionId);
 
     const ai = new GoogleGenAI({ apiKey: c.env.GEMINI_API_KEY });
 
@@ -56,23 +75,19 @@ app.post('/api/chat', async (c) => {
 
     // Process the request asynchronously
     (async () => {
+      let assistantResponse = '';
+      
       try {
+        // Build conversation with history
+        const conversationHistory = buildConversationHistory(chatHistory);
+        conversationHistory.push({
+          role: 'user',
+          parts: [{ text: message }]
+        });
+
         const response = await ai.models.generateContentStream({
           model: 'gemini-2.5-pro-preview-05-06',
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: SYSTEM_PROMPT }]
-            },
-            {
-              role: 'model',
-              parts: [{ text: 'I understand. I will follow these guidelines to provide exceptional, thoughtful responses using my thinking, code execution, and web search capabilities as appropriate.' }]
-            },
-            {
-              role: 'user',
-              parts: [{ text: message }]
-            }
-          ],
+          contents: conversationHistory,
           config: {
             tools: [
               { codeExecution: {} },
@@ -108,6 +123,9 @@ app.post('/api/chat', async (c) => {
                   content: part.codeExecutionResult.output || ''
                 })}\n\n`));
               } else if (part.text) {
+                // Collect assistant response for history
+                assistantResponse += part.text;
+                
                 // Send regular text content
                 await writer.write(encoder.encode(`data: ${JSON.stringify({
                   type: 'text',
@@ -141,6 +159,29 @@ app.post('/api/chat', async (c) => {
           content: 'An error occurred while processing your request.'
         })}\n\n`));
       } finally {
+        // Save chat history
+        if (assistantResponse.trim()) {
+          chatHistory.messages.push(
+            {
+              role: 'user',
+              content: message,
+              timestamp: Date.now()
+            },
+            {
+              role: 'model',
+              content: assistantResponse.trim(),
+              timestamp: Date.now()
+            }
+          );
+          
+          // Keep only last 20 messages to prevent history from growing too large
+          if (chatHistory.messages.length > 20) {
+            chatHistory.messages = chatHistory.messages.slice(-20);
+          }
+          
+          await saveChatHistory(c.env.CHAT_HISTORY, chatHistory);
+        }
+        
         await writer.close();
       }
     })();
@@ -565,8 +606,18 @@ function getScriptJS(): string {
         this.messagesContainer = document.getElementById('messages');
         this.messageInput = document.getElementById('messageInput');
         this.sendButton = document.getElementById('sendButton');
+        this.sessionId = this.getOrCreateSessionId();
         
         this.setupEventListeners();
+    }
+    
+    getOrCreateSessionId() {
+        let sessionId = localStorage.getItem('gemini-chat-session');
+        if (!sessionId) {
+            sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('gemini-chat-session', sessionId);
+        }
+        return sessionId;
     }
     
     setupEventListeners() {
@@ -600,7 +651,7 @@ function getScriptJS(): string {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ message }),
+                body: JSON.stringify({ message, sessionId: this.sessionId }),
             });
             
             if (!response.ok) {
@@ -775,6 +826,86 @@ function getScriptJS(): string {
 document.addEventListener('DOMContentLoaded', () => {
     new ChatApp();
 });`;
+}
+
+// Helper functions for chat history management
+function generateSessionId(): string {
+  return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+async function getChatHistory(kv: KVNamespace | undefined, sessionId: string): Promise<ChatHistory> {
+  if (!kv) {
+    // Return empty history if KV is not available
+    return {
+      sessionId,
+      messages: [],
+      createdAt: Date.now(),
+      lastUpdated: Date.now()
+    };
+  }
+
+  try {
+    const historyData = await kv.get(`chat_${sessionId}`);
+    if (historyData) {
+      return JSON.parse(historyData) as ChatHistory;
+    }
+  } catch (error) {
+    console.error('Error retrieving chat history:', error);
+  }
+
+  // Return empty history if not found or error
+  return {
+    sessionId,
+    messages: [],
+    createdAt: Date.now(),
+    lastUpdated: Date.now()
+  };
+}
+
+async function saveChatHistory(kv: KVNamespace | undefined, history: ChatHistory): Promise<void> {
+  if (!kv) return;
+
+  try {
+    history.lastUpdated = Date.now();
+    await kv.put(`chat_${history.sessionId}`, JSON.stringify(history), {
+      expirationTtl: 7 * 24 * 60 * 60 // 7 days
+    });
+  } catch (error) {
+    console.error('Error saving chat history:', error);
+  }
+}
+
+function buildConversationHistory(chatHistory: ChatHistory): Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> {
+  const conversation = [];
+  
+  // Add system prompt
+  conversation.push({
+    role: 'user' as const,
+    parts: [{ text: SYSTEM_PROMPT }]
+  });
+  
+  conversation.push({
+    role: 'model' as const,
+    parts: [{ text: 'I understand. I will follow these guidelines to provide exceptional, thoughtful responses using my thinking, code execution, and web search capabilities as appropriate.' }]
+  });
+
+  // Add chat history if available
+  if (chatHistory.messages.length > 0) {
+    // Add a context message about previous conversation
+    const historyContext = `Previous conversation context:\n${chatHistory.messages.map(msg => `${msg.role}: ${msg.content.substring(0, 200)}${msg.content.length > 200 ? '...' : ''}`).join('\n')}`;
+    
+    conversation.push({
+      role: 'user' as const,
+      parts: [{ text: historyContext }]
+    });
+    
+    conversation.push({
+      role: 'model' as const,
+      parts: [{ text: 'I understand the previous conversation context and will build upon it in my responses.' }]
+    });
+  }
+
+  return conversation;
 }
 
 export default app;
