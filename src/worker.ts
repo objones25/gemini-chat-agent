@@ -54,10 +54,10 @@ app.get('/script.js', (c) => {
 // Handle chat API
 app.post('/api/chat', async (c) => {
   try {
-    const { message, sessionId } = await c.req.json() as { message: string; sessionId?: string };
+    const { message, audioData, sessionId } = await c.req.json() as { message?: string; audioData?: string; sessionId?: string };
     
-    if (!message) {
-      return c.text('Message is required', 400);
+    if (!message && !audioData) {
+      return c.text('Message or audio data is required', 400);
     }
 
     // Generate or use provided session ID
@@ -80,19 +80,63 @@ app.post('/api/chat', async (c) => {
       try {
         // Build conversation with history
         const conversationHistory = buildConversationHistory(chatHistory);
-        conversationHistory.push({
-          role: 'user',
-          parts: [{ text: message }]
-        });
+        
+        // Handle audio or text message
+        let transcribedText = '';
+        
+        if (audioData) {
+          // First, transcribe the audio without code execution
+          const transcriptionHistory = [...conversationHistory];
+          transcriptionHistory.push({
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'audio/webm',
+                  data: audioData
+                }
+              },
+              {
+                text: 'Please transcribe this audio message and return only the transcribed text without any additional commentary.'
+              }
+            ]
+          });
+          
+          // Get transcription without code execution tools
+          const transcriptionResponse = await ai.models.generateContent({
+            model: 'gemini-2.5-pro-preview-05-06',
+            contents: transcriptionHistory,
+            config: {
+              tools: [{ googleSearch: {} }] // Only search, no code execution
+            }
+          });
+          
+          transcribedText = transcriptionResponse.text || '';
+          
+          // Now add the transcribed text as a regular text message
+          conversationHistory.push({
+            role: 'user',
+            parts: [{ text: `[Voice message transcription]: ${transcribedText}` }]
+          });
+        } else {
+          // Text message
+          conversationHistory.push({
+            role: 'user',
+            parts: [{ text: message! }]
+          });
+        }
+
+        // Always enable all tools for the main response
+        const tools = [
+          { codeExecution: {} },
+          { googleSearch: {} }
+        ];
 
         const response = await ai.models.generateContentStream({
           model: 'gemini-2.5-pro-preview-05-06',
           contents: conversationHistory,
           config: {
-            tools: [
-              { codeExecution: {} },
-              { googleSearch: {} }
-            ],
+            tools: tools,
             thinkingConfig: {
               includeThoughts: true
             }
@@ -164,7 +208,7 @@ app.post('/api/chat', async (c) => {
           chatHistory.messages.push(
             {
               role: 'user',
-              content: message,
+              content: audioData ? '🎤 Voice message' : message!,
               timestamp: Date.now()
             },
             {
@@ -225,7 +269,13 @@ function getIndexHTML(): string {
                     placeholder="Ask me anything... I can think, search, and execute code!"
                     rows="3"
                 ></textarea>
-                <button id="sendButton">Send</button>
+                <div class="button-group">
+                    <button id="recordButton" class="record-button" title="Hold to record voice message">
+                        <span class="record-icon">🎤</span>
+                        <span class="record-text">Hold to Record</span>
+                    </button>
+                    <button id="sendButton">Send</button>
+                </div>
             </div>
         </div>
     </div>
@@ -463,6 +513,66 @@ header p {
     backdrop-filter: blur(10px);
 }
 
+.button-group {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.record-button {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    color: white;
+    border: none;
+    border-radius: 16px;
+    padding: 16px 20px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 8px 32px rgba(239, 68, 68, 0.3);
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+}
+
+.record-button:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 40px rgba(239, 68, 68, 0.4);
+}
+
+.record-button:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+.record-button.recording {
+    background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { box-shadow: 0 8px 32px rgba(239, 68, 68, 0.3); }
+    50% { box-shadow: 0 8px 32px rgba(239, 68, 68, 0.6), 0 0 0 8px rgba(239, 68, 68, 0.2); }
+}
+
+.record-button:disabled {
+    background: rgba(156, 163, 175, 0.3);
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+    animation: none;
+}
+
+.record-icon {
+    font-size: 1.1rem;
+}
+
+.record-text {
+    font-size: 0.9rem;
+}
+
 #messageInput {
     flex: 1;
     border: 1px solid rgba(255, 255, 255, 0.2);
@@ -606,7 +716,14 @@ function getScriptJS(): string {
         this.messagesContainer = document.getElementById('messages');
         this.messageInput = document.getElementById('messageInput');
         this.sendButton = document.getElementById('sendButton');
+        this.recordButton = document.getElementById('recordButton');
         this.sessionId = this.getOrCreateSessionId();
+        
+        // Voice recording properties
+        this.mediaRecorder = null;
+        this.audioChunks = [];
+        this.isRecording = false;
+        this.stream = null;
         
         this.setupEventListeners();
     }
@@ -626,6 +743,40 @@ function getScriptJS(): string {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 this.sendMessage();
+            }
+        });
+        
+        // Voice recording event listeners
+        this.recordButton.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            this.startRecording();
+        });
+        
+        this.recordButton.addEventListener('mouseup', (e) => {
+            e.preventDefault();
+            this.stopRecording();
+        });
+        
+        this.recordButton.addEventListener('mouseleave', (e) => {
+            if (this.isRecording) {
+                this.stopRecording();
+            }
+        });
+        
+        // Touch events for mobile
+        this.recordButton.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            this.startRecording();
+        });
+        
+        this.recordButton.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            this.stopRecording();
+        });
+        
+        this.recordButton.addEventListener('touchcancel', (e) => {
+            if (this.isRecording) {
+                this.stopRecording();
             }
         });
     }
@@ -729,7 +880,7 @@ function getScriptJS(): string {
     
     addMessage(role, content) {
         const messageDiv = document.createElement('div');
-        messageDiv.className = \`message \${role}\`;
+        messageDiv.className = 'message ' + role;
         
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
@@ -749,7 +900,7 @@ function getScriptJS(): string {
         
         const header = document.createElement('div');
         header.className = 'thinking-header';
-        header.innerHTML = '<span class="toggle-icon">▼</span> 🤔 Thinking...';
+        header.innerHTML = '<span class="toggle-icon">▼</span> \uD83E\uDD14 Thinking...';
         
         const contentDiv = document.createElement('div');
         contentDiv.className = 'thinking-content';
@@ -770,7 +921,7 @@ function getScriptJS(): string {
         
         const header = document.createElement('div');
         header.className = 'code-header';
-        header.textContent = \`💻 Code (\${language})\`;
+        header.textContent = '💻 Code (' + language + ')';
         
         const codeContent = document.createElement('pre');
         codeContent.textContent = content;
@@ -819,6 +970,267 @@ function getScriptJS(): string {
         textDiv.style.marginTop = '10px';
         textDiv.textContent = content;
         messageContent.appendChild(textDiv);
+    }
+    
+    async startRecording() {
+        if (this.isRecording) return;
+        
+        try {
+            // Request microphone access
+            this.stream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
+            
+            // Create MediaRecorder with preferred format
+            let mimeType = 'audio/webm;codecs=opus';
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+                mimeType = 'audio/webm';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'audio/mp4';
+                    if (!MediaRecorder.isTypeSupported(mimeType)) {
+                        mimeType = ''; // Use default
+                    }
+                }
+            }
+            
+            this.mediaRecorder = new MediaRecorder(this.stream, {
+                mimeType: mimeType || undefined
+            });
+            
+            this.audioChunks = [];
+            
+            this.mediaRecorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    this.audioChunks.push(event.data);
+                }
+            };
+            
+            this.mediaRecorder.onstop = () => {
+                this.processRecording();
+            };
+            
+            this.mediaRecorder.onerror = (event) => {
+                console.error('MediaRecorder error:', event.error);
+                this.resetRecording();
+            };
+            
+            // Start recording
+            this.mediaRecorder.start(100); // Collect data every 100ms
+            this.isRecording = true;
+            
+            // Update UI
+            this.recordButton.classList.add('recording');
+            this.recordButton.querySelector('.record-text').textContent = 'Recording...';
+            this.recordButton.querySelector('.record-icon').textContent = '\u23F9\uFE0F';
+            this.recordButton.disabled = false;
+            
+            console.log('Recording started');
+            
+        } catch (error) {
+            console.error('Error starting recording:', error);
+            this.handleRecordingError(error);
+        }
+    }
+    
+    stopRecording() {
+        if (!this.isRecording || !this.mediaRecorder) return;
+        
+        try {
+            this.mediaRecorder.stop();
+            this.isRecording = false;
+            
+            // Stop all tracks
+            if (this.stream) {
+                this.stream.getTracks().forEach(track => track.stop());
+                this.stream = null;
+            }
+            
+            // Update UI
+            this.recordButton.classList.remove('recording');
+            this.recordButton.querySelector('.record-text').textContent = 'Processing...';
+            this.recordButton.querySelector('.record-icon').textContent = '\uD83C\uDFA4';
+            this.recordButton.disabled = true;
+            
+            console.log('Recording stopped');
+            
+        } catch (error) {
+            console.error('Error stopping recording:', error);
+            this.resetRecording();
+        }
+    }
+    
+    async processRecording() {
+        try {
+            if (this.audioChunks.length === 0) {
+                throw new Error('No audio data captured');
+            }
+            
+            // Create blob from chunks
+            const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
+            const audioBlob = new Blob(this.audioChunks, { type: mimeType });
+            
+            console.log('Audio blob created:', {
+                size: audioBlob.size,
+                type: audioBlob.type
+            });
+            
+            // Check size limit (20MB for Gemini API)
+            if (audioBlob.size > 20 * 1024 * 1024) {
+                throw new Error('Audio file too large (max 20MB)');
+            }
+            
+            if (audioBlob.size < 1000) {
+                throw new Error('Audio recording too short');
+            }
+            
+            // Convert to base64
+            const base64Audio = await this.blobToBase64(audioBlob);
+            
+            // Send audio message
+            await this.sendAudioMessage(base64Audio, mimeType);
+            
+        } catch (error) {
+            console.error('Error processing recording:', error);
+            this.handleRecordingError(error);
+        } finally {
+            this.resetRecording();
+        }
+    }
+    
+    blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                try {
+                    const base64String = reader.result.split(',')[1]; // Remove data URL prefix
+                    resolve(base64String);
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+        });
+    }
+    
+    async sendAudioMessage(audioData, mimeType) {
+        // Add user message indicator
+        this.addMessage('user', '\uD83C\uDFA4 Voice message');
+        
+        // Disable send button
+        this.sendButton.disabled = true;
+        
+        // Add loading message
+        const loadingMessage = this.addMessage('assistant', '');
+        const loadingDiv = document.createElement('div');
+        loadingDiv.className = 'loading';
+        loadingMessage.querySelector('.message-content').appendChild(loadingDiv);
+        
+        try {
+            const response = await fetch('/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ 
+                    audioData, 
+                    sessionId: this.sessionId 
+                }),
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to get response');
+            }
+            
+            // Remove loading message
+            loadingMessage.remove();
+            
+            // Create new message for streaming response
+            const assistantMessage = this.addMessage('assistant', '');
+            const messageContent = assistantMessage.querySelector('.message-content');
+            
+            // Handle streaming response
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            
+            let buffer = '';
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\\n');
+                buffer = lines.pop(); // Keep incomplete line in buffer
+                
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            this.handleStreamData(data, messageContent);
+                        } catch (e) {
+                            console.error('Error parsing stream data:', e);
+                        }
+                    }
+                }
+            }
+            
+        } catch (error) {
+            console.error('Error sending audio:', error);
+            loadingMessage.querySelector('.message-content').innerHTML = 
+                '<span style="color: red;">Error: Failed to process voice message</span>';
+        } finally {
+            this.sendButton.disabled = false;
+            this.messageInput.focus();
+        }
+    }
+    
+    handleRecordingError(error) {
+        let errorMessage = 'Recording failed';
+        
+        if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+            errorMessage = 'Microphone permission denied. Please allow microphone access and try again.';
+        } else if (error.name === 'NotFoundError') {
+            errorMessage = 'No microphone found. Please connect a microphone and try again.';
+        } else if (error.name === 'NotReadableError') {
+            errorMessage = 'Microphone is being used by another application.';
+        } else if (error.message) {
+            errorMessage = error.message;
+        }
+        
+        // Show error message
+        const errorDiv = document.createElement('div');
+        errorDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #ef4444; color: white; padding: 12px 16px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 1000; max-width: 300px; font-size: 14px;';
+        errorDiv.textContent = errorMessage;
+        document.body.appendChild(errorDiv);
+        
+        // Remove error message after 5 seconds
+        setTimeout(() => {
+            if (errorDiv.parentNode) {
+                errorDiv.parentNode.removeChild(errorDiv);
+            }
+        }, 5000);
+    }
+    
+    resetRecording() {
+        this.isRecording = false;
+        this.mediaRecorder = null;
+        this.audioChunks = [];
+        
+        if (this.stream) {
+            this.stream.getTracks().forEach(track => track.stop());
+            this.stream = null;
+        }
+        
+        // Reset UI
+        this.recordButton.classList.remove('recording');
+        this.recordButton.querySelector('.record-text').textContent = 'Hold to Record';
+        this.recordButton.querySelector('.record-icon').textContent = '\uD83C\uDFA4';
+        this.recordButton.disabled = false;
     }
 }
 
@@ -875,7 +1287,7 @@ async function saveChatHistory(kv: KVNamespace | undefined, history: ChatHistory
   }
 }
 
-function buildConversationHistory(chatHistory: ChatHistory): Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> {
+function buildConversationHistory(chatHistory: ChatHistory): Array<{ role: 'user' | 'model'; parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> }> {
   const conversation = [];
   
   // Add system prompt
