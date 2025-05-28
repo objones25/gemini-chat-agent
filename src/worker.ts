@@ -1,3 +1,5 @@
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { GoogleGenAI } from '@google/genai';
 
 interface Env {
@@ -5,69 +7,46 @@ interface Env {
   CHAT_HISTORY?: KVNamespace;
 }
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    
-    // Handle CORS preflight requests
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
-        },
-      });
-    }
+const app = new Hono<{ Bindings: Env }>();
 
-    // Serve static files
-    if (request.method === 'GET') {
-      if (url.pathname === '/' || url.pathname === '/index.html') {
-        return new Response(getIndexHTML(), {
-          headers: { 
-            'Content-Type': 'text/html',
-            'Access-Control-Allow-Origin': '*'
-          },
-        });
-      }
-      
-      if (url.pathname === '/style.css') {
-        return new Response(getStyleCSS(), {
-          headers: { 
-            'Content-Type': 'text/css',
-            'Access-Control-Allow-Origin': '*'
-          },
-        });
-      }
-      
-      if (url.pathname === '/script.js') {
-        return new Response(getScriptJS(), {
-          headers: { 
-            'Content-Type': 'application/javascript',
-            'Access-Control-Allow-Origin': '*'
-          },
-        });
-      }
-    }
+// Enable CORS for all routes
+app.use('*', cors({
+  origin: '*',
+  allowMethods: ['GET', 'POST', 'OPTIONS'],
+  allowHeaders: ['Content-Type'],
+}));
 
-    // Handle chat API
-    if (request.method === 'POST' && url.pathname === '/api/chat') {
-      return handleChatRequest(request, env);
-    }
+// Serve static files
+app.get('/', (c) => {
+  return c.html(getIndexHTML());
+});
 
-    return new Response('Not Found', { status: 404 });
-  },
-};
+app.get('/index.html', (c) => {
+  return c.html(getIndexHTML());
+});
 
-async function handleChatRequest(request: Request, env: Env): Promise<Response> {
+app.get('/style.css', (c) => {
+  return c.text(getStyleCSS(), 200, {
+    'Content-Type': 'text/css',
+  });
+});
+
+app.get('/script.js', (c) => {
+  return c.text(getScriptJS(), 200, {
+    'Content-Type': 'application/javascript',
+  });
+});
+
+// Handle chat API
+app.post('/api/chat', async (c) => {
   try {
-    const { message } = await request.json() as { message: string };
+    const { message } = await c.req.json() as { message: string };
     
     if (!message) {
-      return new Response('Message is required', { status: 400 });
+      return c.text('Message is required', 400);
     }
 
-    const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+    const ai = new GoogleGenAI({ apiKey: c.env.GEMINI_API_KEY });
 
     // Create a readable stream for Server-Sent Events
     const { readable, writable } = new TransformStream();
@@ -157,16 +136,14 @@ async function handleChatRequest(request: Request, env: Env): Promise<Response> 
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
       },
     });
 
   } catch (error) {
     console.error('Error handling chat request:', error);
-    return new Response('Internal Server Error', { status: 500 });
+    return c.text('Internal Server Error', 500);
   }
-}
+});
 
 function getIndexHTML(): string {
   return `<!DOCTYPE html>
@@ -785,3 +762,5 @@ document.addEventListener('DOMContentLoaded', () => {
     new ChatApp();
 });`;
 }
+
+export default app;
