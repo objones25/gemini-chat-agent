@@ -15,6 +15,60 @@ class ChatApp {
         this.setupEventListeners();
     }
     
+    // Simple markdown parser for basic formatting
+    parseMarkdown(text) {
+        if (!text) return '';
+        
+        // Escape HTML to prevent XSS, but we'll selectively allow our markdown
+        let html = text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        
+        // Parse markdown elements (order matters!)
+        
+        // Headers
+        html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
+        html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
+        html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
+        
+        // Bold and italic (handle ** before * to avoid conflicts)
+        html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+        
+        // Inline code (before other formatting)
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        
+        // Lists (simple implementation)
+        html = html.replace(/^[\*\-\+] (.*)$/gm, '<li>$1</li>');
+        
+        // Wrap consecutive <li> elements in <ul>
+        html = html.replace(/(<li>.*<\/li>)/gs, function(match) {
+            if (match.includes('</ul>')) return match; // Already wrapped
+            return '<ul>' + match + '</ul>';
+        });
+        
+        // Fix multiple consecutive ul tags
+        html = html.replace(/<\/ul>\s*<ul>/g, '');
+        
+        // Line breaks and paragraphs
+        html = html.replace(/\n\n/g, '</p><p>');
+        html = html.replace(/\n/g, '<br>');
+        
+        // Wrap in paragraph tags if there's content
+        if (html.trim() && !html.startsWith('<h') && !html.startsWith('<ul') && !html.startsWith('<p>')) {
+            html = '<p>' + html + '</p>';
+        }
+        
+        // Clean up empty paragraphs
+        html = html.replace(/<p><\/p>/g, '');
+        html = html.replace(/<p>\s*<\/p>/g, '');
+        
+        return html;
+    }
+    
     getOrCreateSessionId() {
         let sessionId = localStorage.getItem('gemini-chat-session');
         if (!sessionId) {
@@ -171,7 +225,12 @@ class ChatApp {
         
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
-        contentDiv.textContent = content;
+        
+        if (role === 'user') {
+            contentDiv.textContent = content; // User messages stay as plain text
+        } else {
+            contentDiv.innerHTML = this.parseMarkdown(content); // Assistant messages get markdown parsing
+        }
         
         messageDiv.appendChild(contentDiv);
         this.messagesContainer.appendChild(messageDiv);
@@ -191,7 +250,7 @@ class ChatApp {
         
         const contentDiv = document.createElement('div');
         contentDiv.className = 'thinking-content';
-        contentDiv.textContent = content;
+        contentDiv.innerHTML = this.parseMarkdown(content); // Parse markdown in thinking content too
         
         header.addEventListener('click', () => {
             thinkingDiv.classList.toggle('collapsed');
@@ -211,7 +270,7 @@ class ChatApp {
         header.textContent = '💻 Code (' + language + ')';
         
         const codeContent = document.createElement('pre');
-        codeContent.textContent = content;
+        codeContent.innerHTML = `<code class="language-${language}">${this.escapeHtml(content)}</code>`;
         
         codeDiv.appendChild(header);
         codeDiv.appendChild(codeContent);
@@ -220,15 +279,14 @@ class ChatApp {
     
     addCodeResultSection(messageContent, content) {
         const resultDiv = document.createElement('div');
-        resultDiv.className = 'code-section';
-        resultDiv.style.background = '#065f46';
+        resultDiv.className = 'code-section result';
         
         const header = document.createElement('div');
         header.className = 'code-header';
         header.textContent = '📊 Code Output';
         
         const resultContent = document.createElement('pre');
-        resultContent.textContent = content;
+        resultContent.innerHTML = `<code>${this.escapeHtml(content)}</code>`;
         
         resultDiv.appendChild(header);
         resultDiv.appendChild(resultContent);
@@ -245,7 +303,7 @@ class ChatApp {
         
         const sourcesDiv = document.createElement('div');
         sourcesDiv.className = 'search-sources';
-        sourcesDiv.textContent = content;
+        sourcesDiv.innerHTML = this.parseMarkdown(content);
         
         searchDiv.appendChild(header);
         searchDiv.appendChild(sourcesDiv);
@@ -254,9 +312,16 @@ class ChatApp {
     
     addTextContent(messageContent, content) {
         const textDiv = document.createElement('div');
-        textDiv.style.marginTop = '10px';
-        textDiv.textContent = content;
+        textDiv.className = 'markdown-content';
+        textDiv.innerHTML = this.parseMarkdown(content); // This is the key change!
         messageContent.appendChild(textDiv);
+    }
+    
+    // Helper function to escape HTML
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
     
     async startRecording() {

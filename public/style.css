@@ -137,6 +137,79 @@ header p {
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
 }
 
+/* Markdown Content Styling */
+.markdown-content {
+    margin: 12px 0;
+    line-height: 1.6;
+}
+
+.markdown-content h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 16px 0 12px 0;
+    color: #ffffff;
+    border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+    padding-bottom: 8px;
+}
+
+.markdown-content h2 {
+    font-size: 1.3rem;
+    font-weight: 600;
+    margin: 14px 0 10px 0;
+    color: #f3f4f6;
+}
+
+.markdown-content h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 12px 0 8px 0;
+    color: #d1d5db;
+}
+
+.markdown-content p {
+    margin: 8px 0;
+    line-height: 1.6;
+}
+
+.markdown-content strong {
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.markdown-content em {
+    font-style: italic;
+    color: #f9fafb;
+}
+
+.markdown-content code {
+    background: rgba(15, 23, 42, 0.8);
+    color: #e2e8f0;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Monaco', 'Menlo', monospace;
+    font-size: 0.9em;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.markdown-content ul {
+    margin: 12px 0;
+    padding-left: 20px;
+}
+
+.markdown-content li {
+    margin: 4px 0;
+    line-height: 1.5;
+    list-style-type: disc;
+}
+
+.markdown-content ul ul {
+    margin: 4px 0;
+}
+
+.markdown-content br {
+    line-height: 1.8;
+}
+
 .thinking-section {
     background: rgba(251, 191, 36, 0.1);
     border: 1px solid rgba(251, 191, 36, 0.3);
@@ -168,6 +241,24 @@ header p {
     line-height: 1.5;
 }
 
+/* Markdown styling in thinking content */
+.thinking-content h1,
+.thinking-content h2,
+.thinking-content h3 {
+    color: #fbbf24;
+    margin: 8px 0 6px 0;
+}
+
+.thinking-content strong {
+    color: #fef3c7;
+}
+
+.thinking-content code {
+    background: rgba(92, 58, 0, 0.5);
+    color: #fef3c7;
+    border-color: rgba(251, 191, 36, 0.3);
+}
+
 .code-section {
     background: rgba(15, 23, 42, 0.8);
     color: #e2e8f0;
@@ -181,6 +272,11 @@ header p {
     backdrop-filter: blur(10px);
 }
 
+.code-section.result {
+    background: rgba(5, 46, 22, 0.8);
+    border-color: rgba(34, 197, 94, 0.3);
+}
+
 .code-header {
     color: #94a3b8;
     font-size: 0.8rem;
@@ -189,6 +285,10 @@ header p {
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+.code-section.result .code-header {
+    color: #86efac;
 }
 
 .search-section {
@@ -213,6 +313,24 @@ header p {
     font-size: 0.9rem;
     color: #93c5fd;
     line-height: 1.5;
+}
+
+/* Markdown styling in search sources */
+.search-sources h1,
+.search-sources h2,
+.search-sources h3 {
+    color: #60a5fa;
+    margin: 8px 0 6px 0;
+}
+
+.search-sources strong {
+    color: #dbeafe;
+}
+
+.search-sources code {
+    background: rgba(30, 64, 175, 0.3);
+    color: #dbeafe;
+    border-color: rgba(59, 130, 246, 0.3);
 }
 
 .input-container {
@@ -418,5 +536,17 @@ header p {
     
     #sendButton {
         padding: 14px 20px;
+    }
+    
+    .markdown-content h1 {
+        font-size: 1.3rem;
+    }
+    
+    .markdown-content h2 {
+        font-size: 1.2rem;
+    }
+    
+    .markdown-content h3 {
+        font-size: 1.05rem;
     }
 }
