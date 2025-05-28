@@ -56,13 +56,64 @@ function cleanTextForTTS(text: string): string {
     .replace(/\s+/g, ' ') // Normalize whitespace
     .trim();
 
-  // Limit length for TTS
-  const maxLength = 800;
-  if (cleaned.length > maxLength) {
-    cleaned = cleaned.substring(0, maxLength) + '...';
+  return cleaned;
+}
+
+// Helper function to intelligently chunk text for TTS
+function chunkTextForTTS(text: string, maxLength: number = 800): string[] {
+  if (text.length <= maxLength) {
+    return [text];
   }
 
-  return cleaned;
+  const chunks: string[] = [];
+  let currentChunk = '';
+  
+  // Split by sentences first
+  const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  
+  for (let i = 0; i < sentences.length; i++) {
+    const sentence = sentences[i].trim() + (i < sentences.length - 1 ? '.' : '');
+    
+    // If adding this sentence would exceed the limit, finalize current chunk
+    if (currentChunk.length + sentence.length > maxLength && currentChunk.length > 0) {
+      chunks.push(currentChunk.trim());
+      currentChunk = sentence;
+    } else {
+      currentChunk += (currentChunk.length > 0 ? ' ' : '') + sentence;
+    }
+  }
+  
+  // Add the final chunk if it has content
+  if (currentChunk.trim().length > 0) {
+    chunks.push(currentChunk.trim());
+  }
+  
+  // If we still have chunks that are too long, split them more aggressively
+  const finalChunks: string[] = [];
+  for (const chunk of chunks) {
+    if (chunk.length <= maxLength) {
+      finalChunks.push(chunk);
+    } else {
+      // Split by words if sentence-based splitting wasn't enough
+      const words = chunk.split(' ');
+      let wordChunk = '';
+      
+      for (const word of words) {
+        if (wordChunk.length + word.length + 1 > maxLength && wordChunk.length > 0) {
+          finalChunks.push(wordChunk.trim());
+          wordChunk = word;
+        } else {
+          wordChunk += (wordChunk.length > 0 ? ' ' : '') + word;
+        }
+      }
+      
+      if (wordChunk.trim().length > 0) {
+        finalChunks.push(wordChunk.trim());
+      }
+    }
+  }
+  
+  return finalChunks.length > 0 ? finalChunks : [text.substring(0, maxLength)];
 }
 
 // Optimized chat history retrieval with caching
@@ -306,35 +357,55 @@ app.post('/api/chat', async (c) => {
               content: 'Generating speech...'
             })}\n\n`));
 
-            // Always generate TTS with the complete final text for better quality
-            const finalCleanText = cleanTextForTTS(assistantResponse);
+            // Clean and chunk the text for TTS
+            const cleanedText = cleanTextForTTS(assistantResponse);
+            const textChunks = chunkTextForTTS(cleanedText, 750); // Slightly smaller chunks for safety
             
-            if (finalCleanText.length > 0) {
-              const ttsResponse = await ai.models.generateContent({
-                model: 'gemini-2.5-flash-preview-tts',
-                contents: [{ parts: [{ text: finalCleanText }] }],
-                config: {
-                  responseModalities: ['AUDIO'],
-                  speechConfig: {
-                    voiceConfig: {
-                      prebuiltVoiceConfig: { voiceName: voice }
-                    }
-                  }
-                }
-              });
+            console.log(`Generating TTS for ${textChunks.length} chunks, total length: ${cleanedText.length}`);
+            
+            if (textChunks.length > 0) {
+              // Send chunk info to frontend
+              await writer.write(encoder.encode(`data: ${JSON.stringify({
+                type: 'ttsChunkInfo',
+                totalChunks: textChunks.length,
+                totalLength: cleanedText.length
+              })}\n\n`));
 
-              const audioData = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-              
-              if (audioData) {
-                await writer.write(encoder.encode(`data: ${JSON.stringify({
-                  type: 'audio',
-                  audioData: audioData
-                })}\n\n`));
-              } else {
-                await writer.write(encoder.encode(`data: ${JSON.stringify({
-                  type: 'ttsError',
-                  content: 'Failed to generate speech'
-                })}\n\n`));
+              // Generate TTS for each chunk
+              for (let i = 0; i < textChunks.length; i++) {
+                try {
+                  const chunkText = textChunks[i];
+                  
+                  const ttsResponse = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash-preview-tts',
+                    contents: [{ parts: [{ text: chunkText }] }],
+                    config: {
+                      responseModalities: ['AUDIO'],
+                      speechConfig: {
+                        voiceConfig: {
+                          prebuiltVoiceConfig: { voiceName: voice }
+                        }
+                      }
+                    }
+                  });
+
+                  const audioData = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+                  
+                  if (audioData) {
+                    await writer.write(encoder.encode(`data: ${JSON.stringify({
+                      type: 'audioChunk',
+                      audioData: audioData,
+                      chunkIndex: i,
+                      totalChunks: textChunks.length,
+                      isLastChunk: i === textChunks.length - 1
+                    })}\n\n`));
+                  } else {
+                    console.error(`Failed to generate audio for chunk ${i + 1}/${textChunks.length}`);
+                  }
+                } catch (chunkError) {
+                  console.error(`Error generating TTS for chunk ${i + 1}:`, chunkError);
+                  // Continue with next chunk even if one fails
+                }
               }
             }
           } catch (ttsError) {

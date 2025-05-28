@@ -17,6 +17,11 @@ class ChatApp {
         this.audioContext = null;
         this.currentAudioSource = null;
         
+        // Audio chunking properties
+        this.audioQueue = [];
+        this.isPlayingAudio = false;
+        this.currentAudioChunk = 0;
+        
         // Performance optimizations
         this.messageQueue = [];
         this.isProcessingQueue = false;
@@ -111,18 +116,32 @@ class ChatApp {
             }
             this.currentAudioSource = null;
         }
+        
+        // Clear audio queue and reset playback state
+        this.audioQueue = [];
+        this.isPlayingAudio = false;
+        this.currentAudioChunk = 0;
     }
     
-    // Optimized audio playback with Web Workers for processing
-    async playAudio(base64AudioData) {
-        if (!this.audioContext || !this.ttsEnabled) {
+    // Queue audio chunk for sequential playback
+    queueAudioChunk(audioData) {
+        this.audioQueue.push(audioData);
+        if (!this.isPlayingAudio) {
+            this.playNextAudioChunk();
+        }
+    }
+    
+    // Play the next audio chunk in the queue
+    async playNextAudioChunk() {
+        if (this.audioQueue.length === 0 || !this.ttsEnabled || !this.audioContext) {
+            this.isPlayingAudio = false;
             return;
         }
         
+        this.isPlayingAudio = true;
+        const audioData = this.audioQueue.shift();
+        
         try {
-            // Stop any currently playing audio
-            this.stopAudio();
-            
             // Resume audio context if suspended
             if (this.audioContext.state === 'suspended') {
                 await this.audioContext.resume();
@@ -132,7 +151,7 @@ class ChatApp {
             requestAnimationFrame(async () => {
                 try {
                     // Convert base64 to ArrayBuffer
-                    const binaryString = atob(base64AudioData);
+                    const binaryString = atob(audioData);
                     const bytes = new Uint8Array(binaryString.length);
                     for (let i = 0; i < binaryString.length; i++) {
                         bytes[i] = binaryString.charCodeAt(i);
@@ -160,22 +179,42 @@ class ChatApp {
                     this.currentAudioSource.buffer = audioBuffer;
                     this.currentAudioSource.connect(this.audioContext.destination);
                     
-                    // Handle audio end
+                    // Handle audio end - play next chunk
                     this.currentAudioSource.onended = () => {
                         this.currentAudioSource = null;
+                        this.currentAudioChunk++;
+                        // Continue with next chunk after a short pause
+                        setTimeout(() => {
+                            this.playNextAudioChunk();
+                        }, 100); // 100ms pause between chunks
                     };
                     
                     this.currentAudioSource.start();
+                    
                 } catch (error) {
-                    console.error('Error in audio processing:', error);
-                    this.showError('Failed to play audio');
+                    console.error('Error in audio chunk processing:', error);
+                    this.showError('Failed to play audio chunk');
+                    // Continue with next chunk even if one fails
+                    setTimeout(() => {
+                        this.playNextAudioChunk();
+                    }, 100);
                 }
             });
             
         } catch (error) {
-            console.error('Error playing audio:', error);
-            this.showError('Failed to play audio');
+            console.error('Error playing audio chunk:', error);
+            // Continue with next chunk even if one fails
+            setTimeout(() => {
+                this.playNextAudioChunk();
+            }, 100);
         }
+    }
+    
+    // Legacy single audio playback (for backward compatibility)
+    async playAudio(base64AudioData) {
+        // Clear any existing queue and play this audio immediately
+        this.stopAudio();
+        this.queueAudioChunk(base64AudioData);
     }
     
     // Optimized markdown parser with caching
@@ -408,9 +447,22 @@ class ChatApp {
             case 'ttsLoading':
                 this.addTTSLoadingSection(messageContent);
                 break;
+            case 'ttsChunkInfo':
+                this.updateTTSLoadingSection(messageContent, `Generating speech (${data.totalChunks} parts, ${data.totalLength} chars)...`);
+                break;
+            case 'audioChunk':
+                if (data.chunkIndex === 0) {
+                    // Remove loading section when first chunk arrives
+                    this.removeTTSLoadingSection(messageContent);
+                }
+                // Queue the audio chunk for sequential playback
+                requestAnimationFrame(() => {
+                    this.queueAudioChunk(data.audioData);
+                });
+                break;
             case 'audio':
+                // Legacy single audio support (fallback)
                 this.removeTTSLoadingSection(messageContent);
-                // Use requestAnimationFrame for smooth audio playback
                 requestAnimationFrame(() => {
                     this.playAudio(data.audioData);
                 });
@@ -443,6 +495,16 @@ class ChatApp {
         const ttsLoadingSection = messageContent.querySelector('.tts-loading-section');
         if (ttsLoadingSection) {
             ttsLoadingSection.remove();
+        }
+    }
+    
+    updateTTSLoadingSection(messageContent, newText) {
+        const ttsLoadingSection = messageContent.querySelector('.tts-loading-section');
+        if (ttsLoadingSection) {
+            const textSpan = ttsLoadingSection.querySelector('.tts-loading-header span:nth-child(2)');
+            if (textSpan) {
+                textSpan.textContent = newText;
+            }
         }
     }
     
