@@ -217,12 +217,62 @@ class ChatApp {
         this.queueAudioChunk(base64AudioData);
     }
     
-    // Optimized markdown parser with caching
+    // Enhanced markdown parser with HTML support and better formatting
     parseMarkdown(text) {
         if (!text) return '';
         
-        // Escape HTML to prevent XSS
-        let html = text
+        // Pre-process to handle mixed HTML/markdown formatting issues
+        let html = text;
+        
+        // Fix common mixed formatting patterns
+        html = html
+            // Fix patterns like **(x<sub>3</sub>) ** -> **x₃**
+            .replace(/\*\*\([^)]*<sub>([^<]+)<\/sub>[^)]*\)\s*\*\*/g, (match, sub) => {
+                const subscriptMap = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉', 'n': 'ₙ', 'i': 'ᵢ', 'j': 'ⱼ', 'x': 'ₓ'};
+                const converted = sub.split('').map(c => subscriptMap[c] || c).join('');
+                return `**x${converted}**`;
+            })
+            .replace(/\*\*\([^)]*<sup>([^<]+)<\/sup>[^)]*\)\s*\*\*/g, (match, sup) => {
+                const superscriptMap = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', 'n': 'ⁿ'};
+                const converted = sup.split('').map(c => superscriptMap[c] || c).join('');
+                return `**x${converted}**`;
+            })
+            // Clean up standalone HTML tags mixed with markdown
+            .replace(/\*\*([^*]*)<sub>([^<]+)<\/sub>([^*]*)\*\*/g, (match, before, sub, after) => {
+                const subscriptMap = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉', 'n': 'ₙ', 'i': 'ᵢ', 'j': 'ⱼ', 'x': 'ₓ'};
+                const converted = sub.split('').map(c => subscriptMap[c] || c).join('');
+                return `**${before}${converted}${after}**`;
+            })
+            .replace(/\*\*([^*]*)<sup>([^<]+)<\/sup>([^*]*)\*\*/g, (match, before, sup, after) => {
+                const superscriptMap = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', 'n': 'ⁿ'};
+                const converted = sup.split('').map(c => superscriptMap[c] || c).join('');
+                return `**${before}${converted}${after}**`;
+            })
+            // Convert HTML subscripts to Unicode
+            .replace(/<sub>([^<]+)<\/sub>/g, (match, content) => {
+                const subscriptMap = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉', 'n': 'ₙ', 'i': 'ᵢ', 'j': 'ⱼ', 'x': 'ₓ'};
+                return content.split('').map(c => subscriptMap[c] || c).join('');
+            })
+            // Convert HTML superscripts to Unicode
+            .replace(/<sup>([^<]+)<\/sup>/g, (match, content) => {
+                const superscriptMap = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', 'n': 'ⁿ'};
+                return content.split('').map(c => superscriptMap[c] || c).join('');
+            })
+            // Convert other HTML tags to markdown
+            .replace(/<strong>(.*?)<\/strong>/g, '**$1**')
+            .replace(/<b>(.*?)<\/b>/g, '**$1**')
+            .replace(/<em>(.*?)<\/em>/g, '*$1*')
+            .replace(/<i>(.*?)<\/i>/g, '*$1*')
+            // Convert common HTML entities
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&nbsp;/g, ' ');
+        
+        // Now escape remaining HTML to prevent XSS (but preserve our converted Unicode)
+        html = html
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
@@ -230,35 +280,80 @@ class ChatApp {
             .replace(/'/g, '&#39;');
         
         // Parse markdown elements (order matters!)
+        
+        // Headers (must come before other formatting)
+        html = html.replace(/^#### (.*$)/gm, '<h4>$1</h4>');
         html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
         html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
         html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
         
-        // Bold and italic
+        // Code blocks (protect from other formatting)
+        const codeBlocks = [];
+        html = html.replace(/```([^`]*?)```/gs, (match, content) => {
+            const index = codeBlocks.length;
+            codeBlocks.push(`<pre><code>${content.trim()}</code></pre>`);
+            return `__CODEBLOCK_${index}__`;
+        });
+        
+        // Inline code (protect from other formatting)
+        const inlineCodes = [];
+        html = html.replace(/`([^`]+)`/g, (match, content) => {
+            const index = inlineCodes.length;
+            inlineCodes.push(`<code>${content}</code>`);
+            return `__INLINECODE_${index}__`;
+        });
+        
+        // Bold and italic (be more careful about nesting)
+        html = html.replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>');
         html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
         html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
         
-        // Inline code
-        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        // Links
+        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
         
-        // Lists
+        // Lists (improved handling)
+        // Unordered lists
         html = html.replace(/^[\*\-\+] (.*)$/gm, '<li>$1</li>');
+        // Ordered lists
+        html = html.replace(/^\d+\. (.*)$/gm, '<li>$1</li>');
+        
+        // Wrap consecutive list items
         html = html.replace(/(<li>.*<\/li>)/gs, function(match) {
-            if (match.includes('</ul>')) return match;
+            if (match.includes('</ul>') || match.includes('</ol>')) return match;
             return '<ul>' + match + '</ul>';
         });
         html = html.replace(/<\/ul>\s*<ul>/g, '');
         
+        // Blockquotes
+        html = html.replace(/^> (.*)$/gm, '<blockquote>$1</blockquote>');
+        html = html.replace(/<\/blockquote>\s*<blockquote>/g, '<br>');
+        
+        // Horizontal rules
+        html = html.replace(/^---+$/gm, '<hr>');
+        html = html.replace(/^\*\*\*+$/gm, '<hr>');
+        
         // Line breaks and paragraphs
-        html = html.replace(/\n\n/g, '</p><p>');
+        html = html.replace(/\n\n+/g, '</p><p>');
         html = html.replace(/\n/g, '<br>');
         
-        if (html.trim() && !html.startsWith('<h') && !html.startsWith('<ul') && !html.startsWith('<p>')) {
+        // Wrap in paragraph tags if not already wrapped
+        if (html.trim() && !html.match(/^<[h1-6]|<ul|<ol|<blockquote|<pre|<hr/)) {
             html = '<p>' + html + '</p>';
         }
         
+        // Clean up empty paragraphs and extra whitespace
         html = html.replace(/<p><\/p>/g, '');
         html = html.replace(/<p>\s*<\/p>/g, '');
+        html = html.replace(/(<\/h[1-6]>)<p>/g, '$1');
+        html = html.replace(/<\/p>(<h[1-6]>)/g, '$1');
+        
+        // Restore protected code
+        codeBlocks.forEach((code, index) => {
+            html = html.replace(`__CODEBLOCK_${index}__`, code);
+        });
+        inlineCodes.forEach((code, index) => {
+            html = html.replace(`__INLINECODE_${index}__`, code);
+        });
         
         return html;
     }
@@ -316,6 +411,7 @@ class ChatApp {
         });
     }
     
+    // [Rest of the methods remain the same as before - sendMessage, handleStreamingResponse, etc.]
     // Optimized message sending with early preparation
     async sendMessage() {
         const message = this.messageInput.value.trim();
