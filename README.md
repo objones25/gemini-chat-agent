@@ -325,6 +325,34 @@ The AI will:
 3. Execute the code
 4. Display the results
 
+### Mathematical Algorithm Implementation
+```
+Ask the AI: "Please use python to determine the 300th prime number using the segmented sieve algorithm"
+```
+
+The AI will demonstrate advanced algorithmic problem-solving:
+1. **Deep Thinking Process**: Show transparent reasoning through multiple thinking iterations
+2. **Algorithm Explanation**: Explain the segmented sieve approach and its advantages
+3. **Code Implementation**: Generate optimized Python code with detailed comments
+4. **Real-time Execution**: Execute the algorithm and display results
+5. **Verification**: Test with known smaller primes to validate correctness
+
+**Expected Output**:
+```
+The 300th prime number is: 1987
+The 1st prime number is: 2
+The 6th prime number is: 13
+The 10th prime number is: 29
+The 16th prime number is: 53
+The 100th prime number is: 541
+```
+
+This example showcases the AI's ability to:
+- Handle complex mathematical algorithms
+- Provide educational explanations
+- Optimize code for performance
+- Validate results through testing
+
 ## 🔍 Troubleshooting
 
 ### Common Issues
