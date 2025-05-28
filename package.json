@@ -1,0 +1,24 @@
+{
+  "name": "gemini-agent",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker chat agent using Google Gemini API",
+  "main": "src/worker.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "start": "wrangler dev",
+    "build": "tsc",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^1.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.78.12"
+  },
+  "keywords": ["cloudflare", "worker", "gemini", "ai", "chat"],
+  "author": "",
+  "license": "MIT"
+}
