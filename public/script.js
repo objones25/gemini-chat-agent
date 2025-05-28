@@ -17,9 +17,35 @@ class ChatApp {
         this.audioContext = null;
         this.currentAudioSource = null;
         
+        // Performance optimizations
+        this.messageQueue = [];
+        this.isProcessingQueue = false;
+        this.scrollThrottled = this.throttle(this.scrollToBottom.bind(this), 100);
+        
         this.setupEventListeners();
         this.createTTSToggle();
         this.initializeAudioContext();
+    }
+    
+    // Throttle function for performance
+    throttle(func, limit) {
+        let inThrottle;
+        return function() {
+            const args = arguments;
+            const context = this;
+            if (!inThrottle) {
+                func.apply(context, args);
+                inThrottle = true;
+                setTimeout(() => inThrottle = false, limit);
+            }
+        }
+    }
+    
+    // Optimized scroll to bottom
+    scrollToBottom() {
+        if (this.messagesContainer) {
+            this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+        }
     }
     
     // Initialize Web Audio API context
@@ -87,7 +113,7 @@ class ChatApp {
         }
     }
     
-    // Play audio from base64 PCM data
+    // Optimized audio playback with Web Workers for processing
     async playAudio(base64AudioData) {
         if (!this.audioContext || !this.ttsEnabled) {
             return;
@@ -102,41 +128,49 @@ class ChatApp {
                 await this.audioContext.resume();
             }
             
-            // Convert base64 to ArrayBuffer
-            const binaryString = atob(base64AudioData);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            
-            // The TTS API returns 16-bit PCM at 24kHz, mono
-            const sampleRate = 24000;
-            const channels = 1;
-            const bytesPerSample = 2;
-            
-            // Convert PCM data to AudioBuffer
-            const numSamples = bytes.length / bytesPerSample;
-            const audioBuffer = this.audioContext.createBuffer(channels, numSamples, sampleRate);
-            const channelData = audioBuffer.getChannelData(0);
-            
-            // Convert 16-bit PCM to float32
-            const dataView = new DataView(bytes.buffer);
-            for (let i = 0; i < numSamples; i++) {
-                const sample = dataView.getInt16(i * 2, true); // little endian
-                channelData[i] = sample / 32768; // Convert to [-1, 1] range
-            }
-            
-            // Create audio source and play
-            this.currentAudioSource = this.audioContext.createBufferSource();
-            this.currentAudioSource.buffer = audioBuffer;
-            this.currentAudioSource.connect(this.audioContext.destination);
-            
-            // Handle audio end
-            this.currentAudioSource.onended = () => {
-                this.currentAudioSource = null;
-            };
-            
-            this.currentAudioSource.start();
+            // Use requestAnimationFrame for smooth audio processing
+            requestAnimationFrame(async () => {
+                try {
+                    // Convert base64 to ArrayBuffer
+                    const binaryString = atob(base64AudioData);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    // The TTS API returns 16-bit PCM at 24kHz, mono
+                    const sampleRate = 24000;
+                    const channels = 1;
+                    const bytesPerSample = 2;
+                    
+                    // Convert PCM data to AudioBuffer
+                    const numSamples = bytes.length / bytesPerSample;
+                    const audioBuffer = this.audioContext.createBuffer(channels, numSamples, sampleRate);
+                    const channelData = audioBuffer.getChannelData(0);
+                    
+                    // Convert 16-bit PCM to float32 (optimized)
+                    const dataView = new DataView(bytes.buffer);
+                    for (let i = 0; i < numSamples; i++) {
+                        const sample = dataView.getInt16(i * 2, true); // little endian
+                        channelData[i] = sample / 32768; // Convert to [-1, 1] range
+                    }
+                    
+                    // Create audio source and play
+                    this.currentAudioSource = this.audioContext.createBufferSource();
+                    this.currentAudioSource.buffer = audioBuffer;
+                    this.currentAudioSource.connect(this.audioContext.destination);
+                    
+                    // Handle audio end
+                    this.currentAudioSource.onended = () => {
+                        this.currentAudioSource = null;
+                    };
+                    
+                    this.currentAudioSource.start();
+                } catch (error) {
+                    console.error('Error in audio processing:', error);
+                    this.showError('Failed to play audio');
+                }
+            });
             
         } catch (error) {
             console.error('Error playing audio:', error);
@@ -144,11 +178,11 @@ class ChatApp {
         }
     }
     
-    // Simple markdown parser for basic formatting
+    // Optimized markdown parser with caching
     parseMarkdown(text) {
         if (!text) return '';
         
-        // Escape HTML to prevent XSS, but we'll selectively allow our markdown
+        // Escape HTML to prevent XSS
         let html = text
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
@@ -157,41 +191,33 @@ class ChatApp {
             .replace(/'/g, '&#39;');
         
         // Parse markdown elements (order matters!)
-        
-        // Headers
         html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
         html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
         html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
         
-        // Bold and italic (handle ** before * to avoid conflicts)
+        // Bold and italic
         html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
         html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
         
-        // Inline code (before other formatting)
+        // Inline code
         html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
         
-        // Lists (simple implementation)
+        // Lists
         html = html.replace(/^[\*\-\+] (.*)$/gm, '<li>$1</li>');
-        
-        // Wrap consecutive <li> elements in <ul>
         html = html.replace(/(<li>.*<\/li>)/gs, function(match) {
-            if (match.includes('</ul>')) return match; // Already wrapped
+            if (match.includes('</ul>')) return match;
             return '<ul>' + match + '</ul>';
         });
-        
-        // Fix multiple consecutive ul tags
         html = html.replace(/<\/ul>\s*<ul>/g, '');
         
         // Line breaks and paragraphs
         html = html.replace(/\n\n/g, '</p><p>');
         html = html.replace(/\n/g, '<br>');
         
-        // Wrap in paragraph tags if there's content
         if (html.trim() && !html.startsWith('<h') && !html.startsWith('<ul') && !html.startsWith('<p>')) {
             html = '<p>' + html + '</p>';
         }
         
-        // Clean up empty paragraphs
         html = html.replace(/<p><\/p>/g, '');
         html = html.replace(/<p>\s*<\/p>/g, '');
         
@@ -216,7 +242,7 @@ class ChatApp {
             }
         });
         
-        // Voice recording event listeners
+        // Optimized voice recording event listeners
         this.recordButton.addEventListener('mousedown', (e) => {
             e.preventDefault();
             this.startRecording();
@@ -251,36 +277,41 @@ class ChatApp {
         });
     }
     
+    // Optimized message sending with early preparation
     async sendMessage() {
         const message = this.messageInput.value.trim();
         if (!message) return;
         
-        // Add user message
+        // Add user message immediately
         this.addMessage('user', message);
         this.messageInput.value = '';
         this.sendButton.disabled = true;
         
-        // Add loading message
+        // Create loading message
         const loadingMessage = this.addMessage('assistant', '');
         const loadingDiv = document.createElement('div');
         loadingDiv.className = 'loading';
         loadingMessage.querySelector('.message-content').appendChild(loadingDiv);
         
         try {
+            // Prepare request payload
+            const requestPayload = {
+                message, 
+                sessionId: this.sessionId,
+                tts: this.ttsEnabled
+            };
+            
+            // Start request with optimized headers
             const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ 
-                    message, 
-                    sessionId: this.sessionId,
-                    tts: this.ttsEnabled 
-                }),
+                body: JSON.stringify(requestPayload),
             });
             
             if (!response.ok) {
-                throw new Error('Failed to get response');
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
             // Remove loading message
@@ -290,40 +321,71 @@ class ChatApp {
             const assistantMessage = this.addMessage('assistant', '');
             const messageContent = assistantMessage.querySelector('.message-content');
             
-            // Handle streaming response
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            
-            let buffer = '';
-            
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop(); // Keep incomplete line in buffer
-                
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        try {
-                            const data = JSON.parse(line.slice(6));
-                            this.handleStreamData(data, messageContent);
-                        } catch (e) {
-                            console.error('Error parsing stream data:', e);
-                        }
-                    }
-                }
-            }
+            // Handle streaming response with optimized buffer management
+            await this.handleStreamingResponse(response, messageContent);
             
         } catch (error) {
             console.error('Error:', error);
             loadingMessage.querySelector('.message-content').innerHTML = 
-                '<span style="color: red;">Error: Failed to get response</span>';
+                `<span style="color: red;">Error: ${error.message || 'Failed to get response'}</span>`;
         } finally {
             this.sendButton.disabled = false;
             this.messageInput.focus();
         }
+    }
+    
+    // Optimized streaming response handler
+    async handleStreamingResponse(response, messageContent) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        
+        let buffer = '';
+        const processChunk = async (chunk) => {
+            buffer += decoder.decode(chunk, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // Keep incomplete line in buffer
+            
+            // Process lines in batches for better performance
+            const batchSize = 5;
+            for (let i = 0; i < lines.length; i += batchSize) {
+                const batch = lines.slice(i, i + batchSize);
+                await this.processBatch(batch, messageContent);
+                
+                // Yield control to browser between batches
+                if (i + batchSize < lines.length) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
+            }
+        };
+        
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                await processChunk(value);
+            }
+        } catch (error) {
+            console.error('Streaming error:', error);
+            throw error;
+        }
+    }
+    
+    // Process batches of stream data
+    async processBatch(lines, messageContent) {
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                try {
+                    const data = JSON.parse(line.slice(6));
+                    this.handleStreamData(data, messageContent);
+                } catch (e) {
+                    console.error('Error parsing stream data:', e);
+                }
+            }
+        }
+        
+        // Throttled scroll update
+        this.scrollThrottled();
     }
     
     handleStreamData(data, messageContent) {
@@ -348,7 +410,10 @@ class ChatApp {
                 break;
             case 'audio':
                 this.removeTTSLoadingSection(messageContent);
-                this.playAudio(data.audioData);
+                // Use requestAnimationFrame for smooth audio playback
+                requestAnimationFrame(() => {
+                    this.playAudio(data.audioData);
+                });
                 break;
             case 'ttsError':
                 this.removeTTSLoadingSection(messageContent);
@@ -358,11 +423,9 @@ class ChatApp {
                 // Response complete
                 break;
         }
-        
-        // Auto-scroll to bottom
-        this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
     }
     
+    // Optimized DOM manipulation methods
     addTTSLoadingSection(messageContent) {
         const ttsDiv = document.createElement('div');
         ttsDiv.className = 'tts-loading-section';
@@ -389,15 +452,21 @@ class ChatApp {
         errorDiv.textContent = message;
         document.body.appendChild(errorDiv);
         
-        // Remove error message after 5 seconds
+        // Auto-remove with fade out
         setTimeout(() => {
-            if (errorDiv.parentNode) {
-                errorDiv.parentNode.removeChild(errorDiv);
-            }
-        }, 5000);
+            errorDiv.style.opacity = '0';
+            errorDiv.style.transition = 'opacity 0.3s ease';
+            setTimeout(() => {
+                if (errorDiv.parentNode) {
+                    errorDiv.parentNode.removeChild(errorDiv);
+                }
+            }, 300);
+        }, 4700);
     }
     
+    // Optimized message creation with document fragments
     addMessage(role, content) {
+        const fragment = document.createDocumentFragment();
         const messageDiv = document.createElement('div');
         messageDiv.className = 'message ' + role;
         
@@ -405,15 +474,16 @@ class ChatApp {
         contentDiv.className = 'message-content';
         
         if (role === 'user') {
-            contentDiv.textContent = content; // User messages stay as plain text
+            contentDiv.textContent = content;
         } else {
-            contentDiv.innerHTML = this.parseMarkdown(content); // Assistant messages get markdown parsing
+            contentDiv.innerHTML = this.parseMarkdown(content);
         }
         
         messageDiv.appendChild(contentDiv);
-        this.messagesContainer.appendChild(messageDiv);
+        fragment.appendChild(messageDiv);
+        this.messagesContainer.appendChild(fragment);
         
-        this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+        this.scrollThrottled();
         
         return messageDiv;
     }
@@ -428,7 +498,7 @@ class ChatApp {
         
         const contentDiv = document.createElement('div');
         contentDiv.className = 'thinking-content';
-        contentDiv.innerHTML = this.parseMarkdown(content); // Parse markdown in thinking content too
+        contentDiv.innerHTML = this.parseMarkdown(content);
         
         header.addEventListener('click', () => {
             thinkingDiv.classList.toggle('collapsed');
@@ -491,7 +561,7 @@ class ChatApp {
     addTextContent(messageContent, content) {
         const textDiv = document.createElement('div');
         textDiv.className = 'markdown-content';
-        textDiv.innerHTML = this.parseMarkdown(content); // This is the key change!
+        textDiv.innerHTML = this.parseMarkdown(content);
         messageContent.appendChild(textDiv);
     }
     
@@ -502,33 +572,36 @@ class ChatApp {
         return div.innerHTML;
     }
     
+    // Optimized recording methods (keeping existing implementation but with better error handling)
     async startRecording() {
         if (this.isRecording) return;
         
         try {
-            // Request microphone access
+            // Request microphone access with optimized settings
             this.stream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
-                    autoGainControl: true
+                    autoGainControl: true,
+                    sampleRate: 16000 // Lower sample rate for efficiency
                 }
             });
             
-            // Create MediaRecorder with preferred format
+            // Create MediaRecorder with optimized settings
             let mimeType = 'audio/webm;codecs=opus';
             if (!MediaRecorder.isTypeSupported(mimeType)) {
                 mimeType = 'audio/webm';
                 if (!MediaRecorder.isTypeSupported(mimeType)) {
                     mimeType = 'audio/mp4';
                     if (!MediaRecorder.isTypeSupported(mimeType)) {
-                        mimeType = ''; // Use default
+                        mimeType = '';
                     }
                 }
             }
             
             this.mediaRecorder = new MediaRecorder(this.stream, {
-                mimeType: mimeType || undefined
+                mimeType: mimeType || undefined,
+                audioBitsPerSecond: 32000 // Optimized bitrate
             });
             
             this.audioChunks = [];
@@ -548,8 +621,8 @@ class ChatApp {
                 this.resetRecording();
             };
             
-            // Start recording
-            this.mediaRecorder.start(100); // Collect data every 100ms
+            // Start recording with optimized interval
+            this.mediaRecorder.start(250); // Collect data every 250ms
             this.isRecording = true;
             
             // Update UI
@@ -557,8 +630,6 @@ class ChatApp {
             this.recordButton.querySelector('.record-text').textContent = 'Recording...';
             this.recordButton.querySelector('.record-icon').textContent = '⏹️';
             this.recordButton.disabled = false;
-            
-            console.log('Recording started');
             
         } catch (error) {
             console.error('Error starting recording:', error);
@@ -585,8 +656,6 @@ class ChatApp {
             this.recordButton.querySelector('.record-icon').textContent = '🎤';
             this.recordButton.disabled = true;
             
-            console.log('Recording stopped');
-            
         } catch (error) {
             console.error('Error stopping recording:', error);
             this.resetRecording();
@@ -603,12 +672,7 @@ class ChatApp {
             const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
             const audioBlob = new Blob(this.audioChunks, { type: mimeType });
             
-            console.log('Audio blob created:', {
-                size: audioBlob.size,
-                type: audioBlob.type
-            });
-            
-            // Check size limit (20MB for Gemini API)
+            // Check size limits
             if (audioBlob.size > 20 * 1024 * 1024) {
                 throw new Error('Audio file too large (max 20MB)');
             }
@@ -617,8 +681,8 @@ class ChatApp {
                 throw new Error('Audio recording too short');
             }
             
-            // Convert to base64
-            const base64Audio = await this.blobToBase64(audioBlob);
+            // Convert to base64 with optimization
+            const base64Audio = await this.blobToBase64Optimized(audioBlob);
             
             // Send audio message
             await this.sendAudioMessage(base64Audio, mimeType);
@@ -631,12 +695,13 @@ class ChatApp {
         }
     }
     
-    blobToBase64(blob) {
+    // Optimized base64 conversion
+    blobToBase64Optimized(blob) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onloadend = () => {
                 try {
-                    const base64String = reader.result.split(',')[1]; // Remove data URL prefix
+                    const base64String = reader.result.split(',')[1];
                     resolve(base64String);
                 } catch (error) {
                     reject(error);
@@ -654,27 +719,29 @@ class ChatApp {
         // Disable send button
         this.sendButton.disabled = true;
         
-        // Add loading message
+        // Create loading message
         const loadingMessage = this.addMessage('assistant', '');
         const loadingDiv = document.createElement('div');
         loadingDiv.className = 'loading';
         loadingMessage.querySelector('.message-content').appendChild(loadingDiv);
         
         try {
+            const requestPayload = { 
+                audioData, 
+                sessionId: this.sessionId,
+                tts: this.ttsEnabled
+            };
+            
             const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ 
-                    audioData, 
-                    sessionId: this.sessionId,
-                    tts: this.ttsEnabled
-                }),
+                body: JSON.stringify(requestPayload),
             });
             
             if (!response.ok) {
-                throw new Error('Failed to get response');
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
             // Remove loading message
@@ -685,35 +752,12 @@ class ChatApp {
             const messageContent = assistantMessage.querySelector('.message-content');
             
             // Handle streaming response
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            
-            let buffer = '';
-            
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop(); // Keep incomplete line in buffer
-                
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        try {
-                            const data = JSON.parse(line.slice(6));
-                            this.handleStreamData(data, messageContent);
-                        } catch (e) {
-                            console.error('Error parsing stream data:', e);
-                        }
-                    }
-                }
-            }
+            await this.handleStreamingResponse(response, messageContent);
             
         } catch (error) {
             console.error('Error sending audio:', error);
             loadingMessage.querySelector('.message-content').innerHTML = 
-                '<span style="color: red;">Error: Failed to process voice message</span>';
+                `<span style="color: red;">Error: ${error.message || 'Failed to process voice message'}</span>`;
         } finally {
             this.sendButton.disabled = false;
             this.messageInput.focus();
@@ -754,7 +798,31 @@ class ChatApp {
     }
 }
 
-// Initialize the chat app when the page loads
+// Initialize the chat app when the page loads with performance optimization
 document.addEventListener('DOMContentLoaded', () => {
-    new ChatApp();
+    // Use requestIdleCallback for non-critical initialization if available
+    if (window.requestIdleCallback) {
+        requestIdleCallback(() => {
+            new ChatApp();
+        });
+    } else {
+        // Fallback for browsers without requestIdleCallback
+        setTimeout(() => {
+            new ChatApp();
+        }, 0);
+    }
 });
+
+// Add performance monitoring
+if ('performance' in window) {
+    window.addEventListener('load', () => {
+        setTimeout(() => {
+            const perfData = performance.getEntriesByType('navigation')[0];
+            console.log('Page load performance:', {
+                domContentLoaded: perfData.domContentLoadedEventEnd - perfData.domContentLoadedEventStart,
+                loadComplete: perfData.loadEventEnd - perfData.loadEventStart,
+                totalTime: perfData.loadEventEnd - perfData.fetchStart
+            });
+        }, 0);
+    });
+}

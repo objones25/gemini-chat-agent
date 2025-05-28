@@ -65,7 +65,97 @@ function cleanTextForTTS(text: string): string {
   return cleaned;
 }
 
-// Handle chat API
+// Optimized chat history retrieval with caching
+const historyCache = new Map<string, { data: ChatHistory; timestamp: number }>();
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+// Cleanup function for memory management (called during requests)
+function cleanupCache() {
+  const now = Date.now();
+  for (const [key, value] of historyCache.entries()) {
+    if (now - value.timestamp > CACHE_DURATION) {
+      historyCache.delete(key);
+    }
+  }
+}
+
+async function getChatHistoryOptimized(kv: KVNamespace | undefined, sessionId: string): Promise<ChatHistory> {
+  // Perform cache cleanup periodically (during request processing)
+  if (Math.random() < 0.1) { // 10% chance to clean on each request
+    cleanupCache();
+  }
+
+  // Check cache first
+  const cacheKey = `chat_${sessionId}`;
+  const cached = historyCache.get(cacheKey);
+  
+  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+    return cached.data;
+  }
+
+  // Default empty history
+  const defaultHistory: ChatHistory = {
+    sessionId,
+    messages: [],
+    createdAt: Date.now(),
+    lastUpdated: Date.now()
+  };
+
+  if (!kv) {
+    return defaultHistory;
+  }
+
+  try {
+    const historyData = await kv.get(cacheKey);
+    if (historyData) {
+      const parsedHistory = JSON.parse(historyData) as ChatHistory;
+      // Update cache
+      historyCache.set(cacheKey, { data: parsedHistory, timestamp: Date.now() });
+      return parsedHistory;
+    }
+  } catch (error) {
+    console.error('Error retrieving chat history:', error);
+  }
+
+  // Cache empty history
+  historyCache.set(cacheKey, { data: defaultHistory, timestamp: Date.now() });
+  return defaultHistory;
+}
+
+// Optimized chat history saving with batching
+const saveQueue = new Map<string, { history: ChatHistory; timeout: number }>();
+
+async function saveChatHistoryOptimized(kv: KVNamespace | undefined, history: ChatHistory): Promise<void> {
+  if (!kv) return;
+
+  const cacheKey = `chat_${history.sessionId}`;
+  
+  // Clear existing timeout if any
+  const existing = saveQueue.get(cacheKey);
+  if (existing) {
+    clearTimeout(existing.timeout);
+  }
+
+  // Update cache immediately
+  historyCache.set(cacheKey, { data: history, timestamp: Date.now() });
+
+  // Batch save with debounce
+  const timeout = setTimeout(async () => {
+    try {
+      history.lastUpdated = Date.now();
+      await kv.put(cacheKey, JSON.stringify(history), {
+        expirationTtl: 7 * 24 * 60 * 60 // 7 days
+      });
+      saveQueue.delete(cacheKey);
+    } catch (error) {
+      console.error('Error saving chat history:', error);
+    }
+  }, 1000); // 1 second debounce
+
+  saveQueue.set(cacheKey, { history, timeout });
+}
+
+// Handle chat API with optimized async processing
 app.post('/api/chat', async (c) => {
   try {
     const { message, audioData, sessionId, tts = false, voice = 'Kore' } = await c.req.json() as { 
@@ -83,9 +173,7 @@ app.post('/api/chat', async (c) => {
     // Generate or use provided session ID
     const currentSessionId = sessionId || generateSessionId();
     
-    // Get chat history from KV storage
-    const chatHistory = await getChatHistory(c.env.CHAT_HISTORY, currentSessionId);
-
+    // Initialize AI client early
     const ai = new GoogleGenAI({ apiKey: c.env.GEMINI_API_KEY });
 
     // Create a readable stream for Server-Sent Events
@@ -93,19 +181,23 @@ app.post('/api/chat', async (c) => {
     const writer = writable.getWriter();
     const encoder = new TextEncoder();
 
+    // Start chat history retrieval in parallel
+    const chatHistoryPromise = getChatHistoryOptimized(c.env.CHAT_HISTORY, currentSessionId);
+
     // Process the request asynchronously
     (async () => {
       let assistantResponse = '';
       
       try {
+        // Wait for chat history (should be fast due to caching)
+        const chatHistory = await chatHistoryPromise;
+        
         // Build conversation with history
         const conversationHistory = buildConversationHistory(chatHistory);
         
         // Handle audio or text message
-        let transcribedText = '';
-        
         if (audioData) {
-          // First, transcribe the audio without code execution
+          // Audio transcription in parallel
           const transcriptionHistory = [...conversationHistory];
           transcriptionHistory.push({
             role: 'user',
@@ -122,18 +214,17 @@ app.post('/api/chat', async (c) => {
             ]
           });
           
-          // Get transcription without code execution tools
+          // Get transcription
           const transcriptionResponse = await ai.models.generateContent({
             model: 'gemini-2.5-pro-preview-05-06',
             contents: transcriptionHistory,
             config: {
-              tools: [{ googleSearch: {} }] // Only search, no code execution
+              tools: [{ googleSearch: {} }]
             }
           });
           
-          transcribedText = transcriptionResponse.text || '';
+          const transcribedText = transcriptionResponse.text || '';
           
-          // Now add the transcribed text as a regular text message
           conversationHistory.push({
             role: 'user',
             parts: [{ text: `[Voice message transcription]: ${transcribedText}` }]
@@ -146,12 +237,13 @@ app.post('/api/chat', async (c) => {
           });
         }
 
-        // Always enable all tools for the main response
+        // Configure tools
         const tools = [
           { codeExecution: {} },
           { googleSearch: {} }
         ];
 
+        // Start main AI response stream
         const response = await ai.models.generateContentStream({
           model: 'gemini-2.5-pro-preview-05-06',
           contents: conversationHistory,
@@ -163,34 +255,29 @@ app.post('/api/chat', async (c) => {
           }
         });
 
+        // Process streaming response
         for await (const chunk of response) {
-          // Handle different types of content
           if (chunk.candidates?.[0]?.content?.parts) {
             for (const part of chunk.candidates[0].content.parts) {
               if (part.thought) {
-                // Send thinking content
                 await writer.write(encoder.encode(`data: ${JSON.stringify({
                   type: 'thinking',
                   content: part.text || ''
                 })}\n\n`));
               } else if (part.executableCode) {
-                // Send code content
                 await writer.write(encoder.encode(`data: ${JSON.stringify({
                   type: 'code',
                   content: part.executableCode.code || '',
                   language: part.executableCode.language || 'python'
                 })}\n\n`));
               } else if (part.codeExecutionResult) {
-                // Send code execution result
                 await writer.write(encoder.encode(`data: ${JSON.stringify({
                   type: 'codeResult',
                   content: part.codeExecutionResult.output || ''
                 })}\n\n`));
               } else if (part.text) {
-                // Collect assistant response for history
                 assistantResponse += part.text;
                 
-                // Send regular text content
                 await writer.write(encoder.encode(`data: ${JSON.stringify({
                   type: 'text',
                   content: part.text
@@ -211,23 +298,21 @@ app.post('/api/chat', async (c) => {
           }
         }
 
-        // Generate TTS if requested and we have text content
+        // Handle TTS after text completion
         if (tts && assistantResponse.trim()) {
           try {
-            // Send TTS loading indicator
             await writer.write(encoder.encode(`data: ${JSON.stringify({
               type: 'ttsLoading',
               content: 'Generating speech...'
             })}\n\n`));
 
-            // Clean the text for TTS
-            const cleanText = cleanTextForTTS(assistantResponse);
+            // Always generate TTS with the complete final text for better quality
+            const finalCleanText = cleanTextForTTS(assistantResponse);
             
-            if (cleanText.length > 0) {
-              // Generate TTS
+            if (finalCleanText.length > 0) {
               const ttsResponse = await ai.models.generateContent({
                 model: 'gemini-2.5-flash-preview-tts',
-                contents: [{ parts: [{ text: cleanText }] }],
+                contents: [{ parts: [{ text: finalCleanText }] }],
                 config: {
                   responseModalities: ['AUDIO'],
                   speechConfig: {
@@ -241,13 +326,11 @@ app.post('/api/chat', async (c) => {
               const audioData = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
               
               if (audioData) {
-                // Send audio data
                 await writer.write(encoder.encode(`data: ${JSON.stringify({
                   type: 'audio',
                   audioData: audioData
                 })}\n\n`));
               } else {
-                // Send TTS error
                 await writer.write(encoder.encode(`data: ${JSON.stringify({
                   type: 'ttsError',
                   content: 'Failed to generate speech'
@@ -256,7 +339,6 @@ app.post('/api/chat', async (c) => {
             }
           } catch (ttsError) {
             console.error('TTS generation error:', ttsError);
-            // Send TTS error
             await writer.write(encoder.encode(`data: ${JSON.stringify({
               type: 'ttsError',
               content: 'Speech generation failed'
@@ -276,8 +358,9 @@ app.post('/api/chat', async (c) => {
           content: 'An error occurred while processing your request.'
         })}\n\n`));
       } finally {
-        // Save chat history
+        // Save chat history asynchronously (non-blocking)
         if (assistantResponse.trim()) {
+          const chatHistory = await chatHistoryPromise;
           chatHistory.messages.push(
             {
               role: 'user',
@@ -296,7 +379,8 @@ app.post('/api/chat', async (c) => {
             chatHistory.messages = chatHistory.messages.slice(-20);
           }
           
-          await saveChatHistory(c.env.CHAT_HISTORY, chatHistory);
+          // Save asynchronously without blocking
+          saveChatHistoryOptimized(c.env.CHAT_HISTORY, chatHistory);
         }
         
         await writer.close();
@@ -322,48 +406,6 @@ function generateSessionId(): string {
   return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
-async function getChatHistory(kv: KVNamespace | undefined, sessionId: string): Promise<ChatHistory> {
-  if (!kv) {
-    // Return empty history if KV is not available
-    return {
-      sessionId,
-      messages: [],
-      createdAt: Date.now(),
-      lastUpdated: Date.now()
-    };
-  }
-
-  try {
-    const historyData = await kv.get(`chat_${sessionId}`);
-    if (historyData) {
-      return JSON.parse(historyData) as ChatHistory;
-    }
-  } catch (error) {
-    console.error('Error retrieving chat history:', error);
-  }
-
-  // Return empty history if not found or error
-  return {
-    sessionId,
-    messages: [],
-    createdAt: Date.now(),
-    lastUpdated: Date.now()
-  };
-}
-
-async function saveChatHistory(kv: KVNamespace | undefined, history: ChatHistory): Promise<void> {
-  if (!kv) return;
-
-  try {
-    history.lastUpdated = Date.now();
-    await kv.put(`chat_${history.sessionId}`, JSON.stringify(history), {
-      expirationTtl: 7 * 24 * 60 * 60 // 7 days
-    });
-  } catch (error) {
-    console.error('Error saving chat history:', error);
-  }
-}
-
 function buildConversationHistory(chatHistory: ChatHistory): Array<{ role: 'user' | 'model'; parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> }> {
   const conversation = [];
   
@@ -378,10 +420,11 @@ function buildConversationHistory(chatHistory: ChatHistory): Array<{ role: 'user
     parts: [{ text: 'I understand. I will follow these guidelines to provide exceptional, thoughtful responses using my thinking, code execution, and web search capabilities as appropriate.' }]
   });
 
-  // Add chat history if available
+  // Add chat history if available (optimized to only include recent relevant context)
   if (chatHistory.messages.length > 0) {
-    // Add a context message about previous conversation
-    const historyContext = `Previous conversation context:\n${chatHistory.messages.map(msg => `${msg.role}: ${msg.content.substring(0, 200)}${msg.content.length > 200 ? '...' : ''}`).join('\n')}`;
+    // Only include last 10 messages for context to reduce token usage
+    const recentMessages = chatHistory.messages.slice(-10);
+    const historyContext = `Previous conversation context:\n${recentMessages.map(msg => `${msg.role}: ${msg.content.substring(0, 150)}${msg.content.length > 150 ? '...' : ''}`).join('\n')}`;
     
     conversation.push({
       role: 'user' as const,
