@@ -75,18 +75,15 @@ graph TB
 
 ### 1. Clone and Install
 ```bash
-git clone https://github.com/yourusername/gemini-chat-agent.git
+git clone https://github.com/objones25/gemini-chat-agent.git
 cd gemini-chat-agent
 npm install
 ```
 
 ### 2. Configure Environment
 ```bash
-# Copy environment template
-cp .dev.vars.example .dev.vars
-
-# Edit .dev.vars with your API key
-GEMINI_API_KEY=your_gemini_api_key_here
+# Create environment file
+echo "GEMINI_API_KEY=your_gemini_api_key_here" > .dev.vars
 ```
 
 ### 3. Run Locally
@@ -392,8 +389,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/gemini-chat-agent/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/gemini-chat-agent/discussions)
+- **Issues**: [GitHub Issues](https://github.com/objones25/gemini-chat-agent/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/objones25/gemini-chat-agent/discussions)
 - **Documentation**: This README and inline code comments
 
 ---
