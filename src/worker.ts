@@ -42,10 +42,39 @@ app.get('*', async (c) => {
   return c.env.ASSETS.fetch(c.req.raw);
 });
 
+// Helper function to clean text for TTS
+function cleanTextForTTS(text: string): string {
+  // Remove markdown formatting
+  let cleaned = text
+    .replace(/#{1,6}\s/g, '') // Remove headers
+    .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold
+    .replace(/\*(.*?)\*/g, '$1') // Remove italics
+    .replace(/`([^`]+)`/g, '$1') // Remove inline code
+    .replace(/```[\s\S]*?```/g, '') // Remove code blocks
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Remove links, keep text
+    .replace(/\n+/g, ' ') // Replace line breaks with spaces
+    .replace(/\s+/g, ' ') // Normalize whitespace
+    .trim();
+
+  // Limit length for TTS
+  const maxLength = 800;
+  if (cleaned.length > maxLength) {
+    cleaned = cleaned.substring(0, maxLength) + '...';
+  }
+
+  return cleaned;
+}
+
 // Handle chat API
 app.post('/api/chat', async (c) => {
   try {
-    const { message, audioData, sessionId } = await c.req.json() as { message?: string; audioData?: string; sessionId?: string };
+    const { message, audioData, sessionId, tts = false, voice = 'Kore' } = await c.req.json() as { 
+      message?: string; 
+      audioData?: string; 
+      sessionId?: string;
+      tts?: boolean;
+      voice?: string;
+    };
     
     if (!message && !audioData) {
       return c.text('Message or audio data is required', 400);
@@ -179,6 +208,59 @@ app.post('/api/chat', async (c) => {
                 content: `Searched: ${metadata.webSearchQueries.join(', ')}`
               })}\n\n`));
             }
+          }
+        }
+
+        // Generate TTS if requested and we have text content
+        if (tts && assistantResponse.trim()) {
+          try {
+            // Send TTS loading indicator
+            await writer.write(encoder.encode(`data: ${JSON.stringify({
+              type: 'ttsLoading',
+              content: 'Generating speech...'
+            })}\n\n`));
+
+            // Clean the text for TTS
+            const cleanText = cleanTextForTTS(assistantResponse);
+            
+            if (cleanText.length > 0) {
+              // Generate TTS
+              const ttsResponse = await ai.models.generateContent({
+                model: 'gemini-2.5-flash-preview-tts',
+                contents: [{ parts: [{ text: cleanText }] }],
+                config: {
+                  responseModalities: ['AUDIO'],
+                  speechConfig: {
+                    voiceConfig: {
+                      prebuiltVoiceConfig: { voiceName: voice }
+                    }
+                  }
+                }
+              });
+
+              const audioData = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+              
+              if (audioData) {
+                // Send audio data
+                await writer.write(encoder.encode(`data: ${JSON.stringify({
+                  type: 'audio',
+                  audioData: audioData
+                })}\n\n`));
+              } else {
+                // Send TTS error
+                await writer.write(encoder.encode(`data: ${JSON.stringify({
+                  type: 'ttsError',
+                  content: 'Failed to generate speech'
+                })}\n\n`));
+              }
+            }
+          } catch (ttsError) {
+            console.error('TTS generation error:', ttsError);
+            // Send TTS error
+            await writer.write(encoder.encode(`data: ${JSON.stringify({
+              type: 'ttsError',
+              content: 'Speech generation failed'
+            })}\n\n`));
           }
         }
 

@@ -12,7 +12,136 @@ class ChatApp {
         this.isRecording = false;
         this.stream = null;
         
+        // TTS properties
+        this.ttsEnabled = localStorage.getItem('tts-enabled') === 'true';
+        this.audioContext = null;
+        this.currentAudioSource = null;
+        
         this.setupEventListeners();
+        this.createTTSToggle();
+        this.initializeAudioContext();
+    }
+    
+    // Initialize Web Audio API context
+    async initializeAudioContext() {
+        try {
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (error) {
+            console.warn('Web Audio API not supported:', error);
+        }
+    }
+    
+    // Create TTS toggle button
+    createTTSToggle() {
+        const buttonGroup = document.querySelector('.button-group');
+        
+        const ttsButton = document.createElement('button');
+        ttsButton.id = 'ttsButton';
+        ttsButton.className = 'tts-button';
+        ttsButton.title = 'Toggle text-to-speech';
+        ttsButton.innerHTML = `
+            <span class="tts-icon">🔊</span>
+            <span class="tts-text">TTS</span>
+        `;
+        
+        // Set initial state
+        if (this.ttsEnabled) {
+            ttsButton.classList.add('enabled');
+        }
+        
+        ttsButton.addEventListener('click', () => {
+            this.toggleTTS();
+        });
+        
+        // Insert before record button
+        buttonGroup.insertBefore(ttsButton, this.recordButton);
+    }
+    
+    // Toggle TTS functionality
+    toggleTTS() {
+        this.ttsEnabled = !this.ttsEnabled;
+        localStorage.setItem('tts-enabled', this.ttsEnabled.toString());
+        
+        const ttsButton = document.getElementById('ttsButton');
+        if (this.ttsEnabled) {
+            ttsButton.classList.add('enabled');
+            ttsButton.title = 'Text-to-speech enabled';
+        } else {
+            ttsButton.classList.remove('enabled');
+            ttsButton.title = 'Text-to-speech disabled';
+            
+            // Stop any currently playing audio
+            this.stopAudio();
+        }
+    }
+    
+    // Stop currently playing audio
+    stopAudio() {
+        if (this.currentAudioSource) {
+            try {
+                this.currentAudioSource.stop();
+            } catch (error) {
+                // Audio source might already be stopped
+            }
+            this.currentAudioSource = null;
+        }
+    }
+    
+    // Play audio from base64 PCM data
+    async playAudio(base64AudioData) {
+        if (!this.audioContext || !this.ttsEnabled) {
+            return;
+        }
+        
+        try {
+            // Stop any currently playing audio
+            this.stopAudio();
+            
+            // Resume audio context if suspended
+            if (this.audioContext.state === 'suspended') {
+                await this.audioContext.resume();
+            }
+            
+            // Convert base64 to ArrayBuffer
+            const binaryString = atob(base64AudioData);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            
+            // The TTS API returns 16-bit PCM at 24kHz, mono
+            const sampleRate = 24000;
+            const channels = 1;
+            const bytesPerSample = 2;
+            
+            // Convert PCM data to AudioBuffer
+            const numSamples = bytes.length / bytesPerSample;
+            const audioBuffer = this.audioContext.createBuffer(channels, numSamples, sampleRate);
+            const channelData = audioBuffer.getChannelData(0);
+            
+            // Convert 16-bit PCM to float32
+            const dataView = new DataView(bytes.buffer);
+            for (let i = 0; i < numSamples; i++) {
+                const sample = dataView.getInt16(i * 2, true); // little endian
+                channelData[i] = sample / 32768; // Convert to [-1, 1] range
+            }
+            
+            // Create audio source and play
+            this.currentAudioSource = this.audioContext.createBufferSource();
+            this.currentAudioSource.buffer = audioBuffer;
+            this.currentAudioSource.connect(this.audioContext.destination);
+            
+            // Handle audio end
+            this.currentAudioSource.onended = () => {
+                this.currentAudioSource = null;
+            };
+            
+            this.currentAudioSource.start();
+            
+        } catch (error) {
+            console.error('Error playing audio:', error);
+            this.showError('Failed to play audio');
+        }
     }
     
     // Simple markdown parser for basic formatting
@@ -143,7 +272,11 @@ class ChatApp {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ message, sessionId: this.sessionId }),
+                body: JSON.stringify({ 
+                    message, 
+                    sessionId: this.sessionId,
+                    tts: this.ttsEnabled 
+                }),
             });
             
             if (!response.ok) {
@@ -210,6 +343,17 @@ class ChatApp {
             case 'text':
                 this.addTextContent(messageContent, data.content);
                 break;
+            case 'ttsLoading':
+                this.addTTSLoadingSection(messageContent);
+                break;
+            case 'audio':
+                this.removeTTSLoadingSection(messageContent);
+                this.playAudio(data.audioData);
+                break;
+            case 'ttsError':
+                this.removeTTSLoadingSection(messageContent);
+                this.showError(data.content);
+                break;
             case 'complete':
                 // Response complete
                 break;
@@ -217,6 +361,40 @@ class ChatApp {
         
         // Auto-scroll to bottom
         this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+    }
+    
+    addTTSLoadingSection(messageContent) {
+        const ttsDiv = document.createElement('div');
+        ttsDiv.className = 'tts-loading-section';
+        ttsDiv.innerHTML = `
+            <div class="tts-loading-header">
+                <span class="tts-icon">🔊</span>
+                <span>Generating speech...</span>
+                <div class="loading-spinner"></div>
+            </div>
+        `;
+        messageContent.appendChild(ttsDiv);
+    }
+    
+    removeTTSLoadingSection(messageContent) {
+        const ttsLoadingSection = messageContent.querySelector('.tts-loading-section');
+        if (ttsLoadingSection) {
+            ttsLoadingSection.remove();
+        }
+    }
+    
+    showError(message) {
+        const errorDiv = document.createElement('div');
+        errorDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #ef4444; color: white; padding: 12px 16px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 1000; max-width: 300px; font-size: 14px;';
+        errorDiv.textContent = message;
+        document.body.appendChild(errorDiv);
+        
+        // Remove error message after 5 seconds
+        setTimeout(() => {
+            if (errorDiv.parentNode) {
+                errorDiv.parentNode.removeChild(errorDiv);
+            }
+        }, 5000);
     }
     
     addMessage(role, content) {
@@ -490,7 +668,8 @@ class ChatApp {
                 },
                 body: JSON.stringify({ 
                     audioData, 
-                    sessionId: this.sessionId 
+                    sessionId: this.sessionId,
+                    tts: this.ttsEnabled
                 }),
             });
             
@@ -554,18 +733,7 @@ class ChatApp {
             errorMessage = error.message;
         }
         
-        // Show error message
-        const errorDiv = document.createElement('div');
-        errorDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #ef4444; color: white; padding: 12px 16px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 1000; max-width: 300px; font-size: 14px;';
-        errorDiv.textContent = errorMessage;
-        document.body.appendChild(errorDiv);
-        
-        // Remove error message after 5 seconds
-        setTimeout(() => {
-            if (errorDiv.parentNode) {
-                errorDiv.parentNode.removeChild(errorDiv);
-            }
-        }, 5000);
+        this.showError(errorMessage);
     }
     
     resetRecording() {
